@@ -485,7 +485,19 @@ export default function OperatorList() {
                               const roleId = boundRoles[0].id;
                               const role = roles.find((item) => item.id === roleId);
                               if (!next || !role) return;
-                              const updatedRole: RoleRow = { ...role, operatorId: nextId, updatedAt: nowIso(), revision: ROW_REVISION };
+                              if (role.understudyActive) {
+                                message.warning('该角色替演接场中，请先到角色指派页撤销接场再换绑');
+                                return;
+                              }
+                              // 新操耍人若兼该角色替演，同一人不能既主又替
+                              const sameAsUnderstudy = role.understudyId === nextId;
+                              const updatedRole: RoleRow = {
+                                ...role,
+                                operatorId: nextId,
+                                understudyId: sameAsUnderstudy ? null : role.understudyId,
+                                updatedAt: nowIso(),
+                                revision: ROW_REVISION,
+                              };
                               const { db } = await import('../utils/db');
                               await db.roles.put(updatedRole);
                               await putOperator({
@@ -501,7 +513,11 @@ export default function OperatorList() {
                                 revision: ROW_REVISION,
                               });
                               await reload();
-                              message.success(`「${role.name}」已换绑给 ${next.name}`);
+                              message.success(
+                                sameAsUnderstudy
+                                  ? `「${role.name}」已换绑给 ${next.name}；其原替演身份已解除`
+                                  : `「${role.name}」已换绑给 ${next.name}`,
+                              );
                             }}
                           />
                         </div>

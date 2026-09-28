@@ -31,6 +31,7 @@ import {
   DeleteOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RollbackOutlined,
   SaveOutlined,
   SoundOutlined,
   SwapOutlined,
@@ -57,6 +58,7 @@ import { SHADOW_SCREEN_LABEL } from '../types/scene';
 import {
   ROW_REVISION,
   getScene,
+  listAllRoles,
   listRolesByScene,
   putRole,
   removeRole,
@@ -78,6 +80,7 @@ export default function RoleAssign() {
 
   const operators = useOperatorStore((state) => state.operators);
   const loadOperators = useOperatorStore((state) => state.loadOperators);
+  const syncAssignments = useOperatorStore((state) => state.syncAssignments);
   const scenes = useSceneStore((state) => state.scenes);
   const loadScenes = useSceneStore((state) => state.loadScenes);
   const plays = usePlayStore((state) => state.plays);
@@ -142,6 +145,8 @@ export default function RoleAssign() {
       entranceCue: values.entranceCue.trim(),
       lineNote: values.lineNote.trim(),
       operatorId: null,
+      understudyId: null,
+      understudyActive: false,
       createdAt: nowIso(),
       updatedAt: nowIso(),
       revision: ROW_REVISION,
@@ -169,7 +174,21 @@ export default function RoleAssign() {
     });
   };
 
+  /** 某师傅在本场操耍的角色名（排除指定角色自身），用于替演禁选与接场拦截 */
+  const sceneRoleNamesOf = useCallback(
+    (operatorId: string, excludeRoleId?: string): string[] =>
+      roles
+        .filter((role) => role.operatorId === operatorId && role.id !== excludeRoleId)
+        .map((role) => role.name),
+    [roles],
+  );
+
   const handleBind = async (roleId: string, operatorId: string) => {
+    const target = roles.find((role) => role.id === roleId);
+    if (target?.understudyActive) {
+      message.warning('替演接场中，请先撤销接场再调整主操耍人');
+      return;
+    }
     const assessment = conflict.assess(roleId, operatorId);
     if (!assessment.assignable) {
       message.warning(assessment.blockReason);
@@ -182,13 +201,102 @@ export default function RoleAssign() {
     }
     const holder = operators.find((operator) => operator.id === operatorId);
     await patchRole(roleId, { operatorId });
-    message.success(`已指派给 ${holder?.name ?? '该操耍人'}`);
+    // 新主操耍人原兼替演时，同一人不能既主又替，自动撤掉替演
+    if (target && target.understudyId === operatorId) {
+      await patchRole(roleId, { understudyId: null });
+      message.info(`已指派给 ${holder?.name ?? '该操耍人'}；其原替演身份已解除`);
+    } else {
+      message.success(`已指派给 ${holder?.name ?? '该操耍人'}`);
+    }
   };
 
   const handleUnbind = async (roleId: string) => {
+    const target = roles.find((role) => role.id === roleId);
+    if (target?.understudyActive) {
+      message.warning('替演接场中，请先撤销接场再解绑主操耍人');
+      return;
+    }
     await conflict.unbind(roleId);
     await patchRole(roleId, { operatorId: null });
     message.success('已解绑操耍人');
+  };
+
+  const handleSetUnderstudy = async (roleId: string, operatorId: string | null) => {
+    const target = roles.find((role) => role.id === roleId);
+    if (!target) return;
+    if (target.understudyActive) {
+      message.warning('替演接场中，请先撤销接场再更换替演');
+      return;
+    }
+    if (operatorId) {
+      // 兜底拦截：同场已经操耍其他角色（含本角色）的师傅不能做替演
+      const heldNames = sceneRoleNamesOf(operatorId);
+      const isMainOfSelf = target.operatorId === operatorId;
+      if (isMainOfSelf || heldNames.length > 0) {
+        const holder = operators.find((operator) => operator.id === operatorId);
+        const detail = isMainOfSelf ? '其就是该角色的主操耍人' : `其在本场还操耍「${heldNames.join('」「')}」`;
+        message.warning(`${holder?.name ?? '该师傅'}不能选为替演：${detail}`);
+        return;
+      }
+    }
+    await patchRole(roleId, { understudyId: operatorId });
+    if (operatorId) {
+      const holder = operators.find((operator) => operator.id === operatorId);
+      message.success(`已定 ${holder?.name ?? '该操耍人'} 为「${target.name}」的替演`);
+    } else {
+      message.success('已取消替演');
+    }
+  };
+
+  /** 替演接场：替演升为主操耍人，原主操耍人自动转为替演；撞场时原样挡住 */
+  const handleTakeover = async (role: RoleRow) => {
+    if (!role.operatorId || !role.understudyId || role.understudyActive) return;
+    const understudyName = operators.find((operator) => operator.id === role.understudyId)?.name ?? '替演师傅';
+    const mainName = operators.find((operator) => operator.id === role.operatorId)?.name ?? '原主操耍人';
+    const clashNames = sceneRoleNamesOf(role.understudyId, role.id);
+    if (clashNames.length > 0) {
+      message.warning(
+        `接场被挡住：${understudyName} 在本场还操耍「${clashNames.join('」「')}」，主次关系保持不变`,
+      );
+      return;
+    }
+    const next: RoleRow = {
+      ...role,
+      operatorId: role.understudyId,
+      understudyId: role.operatorId,
+      understudyActive: true,
+      updatedAt: nowIso(),
+      revision: ROW_REVISION,
+    };
+    await putRole(next);
+    setRoles((prev) => prev.map((item) => (item.id === role.id ? next : item)));
+    await syncAssignments(await listAllRoles());
+    message.success(`「${role.name}」已由 ${understudyName} 接场，${mainName} 自动转为替演`);
+  };
+
+  /** 撤销接场：主次两人回到接场前的指派关系 */
+  const handleRevertTakeover = async (role: RoleRow) => {
+    if (!role.understudyActive || !role.operatorId || !role.understudyId) return;
+    const returnName = operators.find((operator) => operator.id === role.understudyId)?.name ?? '原主操耍人';
+    const clashNames = sceneRoleNamesOf(role.understudyId, role.id);
+    if (clashNames.length > 0) {
+      message.warning(
+        `撤销被挡住：${returnName} 目前在本场还操耍「${clashNames.join('」「')}」，请先调整该场指派`,
+      );
+      return;
+    }
+    const next: RoleRow = {
+      ...role,
+      operatorId: role.understudyId,
+      understudyId: role.operatorId,
+      understudyActive: false,
+      updatedAt: nowIso(),
+      revision: ROW_REVISION,
+    };
+    await putRole(next);
+    setRoles((prev) => prev.map((item) => (item.id === role.id ? next : item)));
+    await syncAssignments(await listAllRoles());
+    message.success(`已撤销接场，「${role.name}」回到由 ${returnName} 操耍`);
   };
 
   const columns: ColumnsType<RoleRow> = [
@@ -277,6 +385,7 @@ export default function RoleAssign() {
               compact
               showConflictAlert={false}
               placeholder="指派操耍人"
+              disabled={record.understudyActive}
               onChange={(operatorId) => void handleBind(record.id, operatorId)}
               onClear={() => void handleUnbind(record.id)}
               onBlocked={(reason) => message.warning(reason)}
@@ -289,6 +398,90 @@ export default function RoleAssign() {
               <Typography.Text type="warning" style={{ fontSize: 12 }}>
                 尚未指派操耍人
               </Typography.Text>
+            )}
+          </Space>
+        );
+      },
+    },
+    {
+      title: '替演师傅',
+      dataIndex: 'understudyId',
+      width: 260,
+      render: (_value, record) => {
+        const understudy = operators.find((operator) => operator.id === record.understudyId) ?? null;
+        const covering = operators.find((operator) => operator.id === record.operatorId) ?? null;
+        const options = operators.map((operator) => {
+          const heldNames = sceneRoleNamesOf(operator.id);
+          const isMainOfSelf = record.operatorId === operator.id;
+          const disabled = isMainOfSelf || heldNames.length > 0;
+          const reason = isMainOfSelf ? '本角色主操耍人' : `本场已操耍「${heldNames.join('」「')}」`;
+          return {
+            value: operator.id,
+            disabled,
+            label: disabled ? `${operator.name}（${reason}）` : operator.name,
+          };
+        });
+        return (
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            <Select<string>
+              size="small"
+              style={{ minWidth: 180 }}
+              placeholder="指定替演师傅"
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              disabled={record.understudyActive}
+              value={record.understudyId ?? undefined}
+              options={options}
+              notFoundContent="操耍人档为空，请先到「操耍人档」新增"
+              onChange={(next?: string) => void handleSetUnderstudy(record.id, next ?? null)}
+            />
+            {record.understudyActive ? (
+              <Space size={4} wrap>
+                <Tag color="orange">替演接场中</Tag>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  现由 {covering?.name ?? '替演'} 顶场
+                </Typography.Text>
+                <Button
+                  size="small"
+                  icon={<RollbackOutlined />}
+                  onClick={() => void handleRevertTakeover(record)}
+                >
+                  撤销接场
+                </Button>
+              </Space>
+            ) : (
+              <Space size={4} wrap>
+                {understudy ? (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    替演：{understudy.name}
+                  </Typography.Text>
+                ) : (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    未定替演
+                  </Typography.Text>
+                )}
+                <Tooltip
+                  title={
+                    !record.operatorId
+                      ? '先指派主操耍人，才能点替演接场'
+                      : !record.understudyId
+                        ? '先指定替演师傅，才能点替演接场'
+                        : '主操耍人上不了场时，一键让替演接场'
+                  }
+                >
+                  <Button
+                    size="small"
+                    type="primary"
+                    ghost
+                    icon={<SwapOutlined />}
+                    disabled={!record.operatorId || !record.understudyId}
+                    onClick={() => void handleTakeover(record)}
+                  >
+                    替演接场
+                  </Button>
+                </Tooltip>
+              </Space>
             )}
           </Space>
         );
@@ -383,6 +576,9 @@ export default function RoleAssign() {
               <Typography.Text style={{ fontSize: 12 }}>
                 指派时会按操耍人已排时段拦截冲突；需要调整档期请到「操耍人档」增删时段。
               </Typography.Text>
+              <Typography.Text style={{ fontSize: 12 }}>
+                每个角色可定一位替演（同场已操耍其他角色的师傅禁选）；主操耍人缺席时点「替演接场」，若替演在本场另有角色会说明演了谁并挡住，接场后可随时撤销回到原班底。
+              </Typography.Text>
               {conflict.conflicts.slice(0, 3).map((pair) => (
                 <Typography.Text key={`${pair.left.slotId}-${pair.right.slotId}`} type="danger" style={{ fontSize: 12 }}>
                   {pair.describe}
@@ -410,7 +606,7 @@ export default function RoleAssign() {
             columns={columns}
             dataSource={roles}
             pagination={false}
-            scroll={{ x: 1200 }}
+            scroll={{ x: 1460 }}
             expandable={{
               expandedRowRender: (record) => {
                 const assessmentList = optionsFor(record.id);
@@ -422,6 +618,7 @@ export default function RoleAssign() {
                       value={record.operatorId}
                       options={assessmentList}
                       placeholder="为该角色选择操耍人"
+                      disabled={record.understudyActive}
                       onChange={(operatorId) => void handleBind(record.id, operatorId)}
                       onClear={() => void handleUnbind(record.id)}
                       onBlocked={(reason) => message.warning(reason)}

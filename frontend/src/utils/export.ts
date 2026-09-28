@@ -71,6 +71,10 @@ export function exportPlayCsv(
     return operators.find((item) => item.id === id)?.name ?? '（已解绑）';
   };
 
+  /** 替演名（兼容旧存档缺字段）；未定显示「未定替演」 */
+  const understudyName = (role: ShadowRole): string =>
+    role.understudyId ? operatorName(role.understudyId) : '未定替演';
+
   const header = [
     '场序',
     '场次',
@@ -81,6 +85,7 @@ export function exportPlayCsv(
     '行当',
     '影件',
     '操耍人',
+    '替演',
     '锣鼓点',
     '乐器',
     '秒点',
@@ -114,6 +119,7 @@ export function exportPlayCsv(
             role ? ROLE_TYPE_LABEL[role.roleType] : '',
             role ? role.propParts.map((part) => PROP_PART_LABEL[part]).join('／') || '无需拆件' : '',
             role ? operatorName(role.operatorId) : '',
+            role ? understudyName(role) : '',
             cue ? BEAT_NAME_LABEL[cue.beatName] : '',
             cue ? INSTRUMENT_LABEL[cue.instrument] : '',
             cue ? secondsToTimecode(cue.atSecond) : '',
@@ -207,9 +213,9 @@ export function buildCallSheetText(
       );
       sceneRoles.forEach((role) => {
         lines.push(
-          `  · ${role.name}（${ROLE_TYPE_LABEL[role.roleType]}）操耍：${operatorName(role.operatorId)}｜影件：${
-            role.propParts.map((part) => PROP_PART_LABEL[part]).join('／') || '无需拆件'
-          }`,
+          `  · ${role.name}（${ROLE_TYPE_LABEL[role.roleType]}）操耍：${operatorName(role.operatorId)}｜替演：${
+            role.understudyId ? operatorName(role.understudyId) : '未定'
+          }｜影件：${role.propParts.map((part) => PROP_PART_LABEL[part]).join('／') || '无需拆件'}`,
         );
       });
     });

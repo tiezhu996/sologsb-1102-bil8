@@ -14,7 +14,7 @@ import { nowIso } from './uuid';
 import { seedDatabase } from './seed';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据库名 */
 export const DB_NAME = 'gbshadowplay';
@@ -31,7 +31,7 @@ export type RoleRow = ShadowRole & Revisioned;
 export type OperatorRow = Operator & Revisioned;
 export type CueRow = PercussionCue & Revisioned;
 
-export const ROW_REVISION = 2;
+export const ROW_REVISION = 3;
 
 class ShadowPlayDatabase extends Dexie {
   plays!: Table<PlayRow, string>;
@@ -53,7 +53,7 @@ class ShadowPlayDatabase extends Dexie {
     });
 
     // v2：新增 revision 行修订号；场次补充索引，锣鼓点补充 playId 冗余便于按剧目统计
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         plays: 'id, title, genre, status, createdAt, updatedAt',
         scenes: 'id, playId, seq, progress, needsShadowScreen',
@@ -77,6 +77,27 @@ class ShadowPlayDatabase extends Dexie {
             if (typeof row.createdAt !== 'string') row.createdAt = row.updatedAt;
           });
         }
+      });
+
+    // v3：影人角色新增替演字段（understudyId / understudyActive），替演按操耍人建索引
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        plays: 'id, title, genre, status, createdAt, updatedAt',
+        scenes: 'id, playId, seq, progress, needsShadowScreen',
+        roles: 'id, sceneId, operatorId, understudyId, roleType, name',
+        operators: 'id, name, rehearsalHours',
+        cues: 'id, sceneId, atSecond, instrument, beatName',
+      })
+      .upgrade(async (tx) => {
+        // 迁移：历史角色没有替演概念，补 null / false，界面照常显示
+        await tx
+          .table('roles')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            row.revision = ROW_REVISION;
+            if (row.understudyId === undefined) row.understudyId = null;
+            if (typeof row.understudyActive !== 'boolean') row.understudyActive = false;
+          });
       });
   }
 }
@@ -194,6 +215,17 @@ export async function removeOperator(id: string): Promise<void> {
     if (bound.length > 0) {
       await db.roles.bulkPut(bound.map((role) => ({ ...role, operatorId: null, updatedAt: nowIso() })));
     }
+    const understudyBound = await db.roles.where('understudyId').equals(id).toArray();
+    if (understudyBound.length > 0) {
+      await db.roles.bulkPut(
+        understudyBound.map((role) => ({
+          ...role,
+          understudyId: null,
+          understudyActive: false,
+          updatedAt: nowIso(),
+        })),
+      );
+    }
     await db.cues.where('leadOperator').equals(id).modify({ leadOperator: null });
     await db.operators.delete(id);
   });
@@ -266,7 +298,15 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION });
     await db.plays.bulkPut(snapshot.plays.map(rev));
     await db.scenes.bulkPut(snapshot.scenes.map(rev));
-    await db.roles.bulkPut(snapshot.roles.map(rev));
+    // 旧存档的角色没有替演字段，导入时补 null / false，不报错
+    await db.roles.bulkPut(
+      snapshot.roles.map((role) => ({
+        ...role,
+        understudyId: role.understudyId ?? null,
+        understudyActive: role.understudyActive ?? false,
+        revision: ROW_REVISION,
+      })),
+    );
     await db.operators.bulkPut(snapshot.operators.map(rev));
     await db.cues.bulkPut(snapshot.cues.map(rev));
   });
