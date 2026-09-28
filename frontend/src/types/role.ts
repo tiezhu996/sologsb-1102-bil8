@@ -26,6 +26,10 @@ export interface ShadowRole {
   lineNote: string;
   /** 已指派的操耍人 id，未指派为 null */
   operatorId: string | null;
+  /** 替演师傅 id，未指定为 null；旧存档缺字段时由迁移/导入逻辑补成 null */
+  understudyOperatorId: string | null;
+  /** 是否正在由替演师傅接场（临时主次互换的标记，撤销接场后回到 false） */
+  understudyOn: boolean;
   /** 创建时间（ISO 字符串） */
   createdAt: string;
   /** 最近修改时间（ISO 字符串） */

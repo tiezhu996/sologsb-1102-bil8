@@ -14,7 +14,7 @@ import { nowIso } from './uuid';
 import { seedDatabase } from './seed';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据库名 */
 export const DB_NAME = 'gbshadowplay';
@@ -31,7 +31,7 @@ export type RoleRow = ShadowRole & Revisioned;
 export type OperatorRow = Operator & Revisioned;
 export type CueRow = PercussionCue & Revisioned;
 
-export const ROW_REVISION = 2;
+export const ROW_REVISION = 3;
 
 class ShadowPlayDatabase extends Dexie {
   plays!: Table<PlayRow, string>;
@@ -77,6 +77,25 @@ class ShadowPlayDatabase extends Dexie {
             if (typeof row.createdAt !== 'string') row.createdAt = row.updatedAt;
           });
         }
+      });
+
+    // v3：角色新增替演师傅（understudyOperatorId，可索引）与接场状态（understudyOn）；
+    // 旧存档里没有这两个字段，全部按「无替演、未接场」兜底，保证升级不报错。
+    // 注意：understudyOn 是布尔值，IndexedDB 不接受布尔键，故不建索引。
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        plays: 'id, title, genre, status, createdAt, updatedAt',
+        scenes: 'id, playId, seq, progress, needsShadowScreen',
+        roles: 'id, sceneId, operatorId, roleType, name, understudyOperatorId',
+        operators: 'id, name, rehearsalHours',
+        cues: 'id, sceneId, atSecond, instrument, beatName',
+      })
+      .upgrade(async (tx) => {
+        await tx.table('roles').toCollection().modify((row: Record<string, unknown>) => {
+          if (!('understudyOperatorId' in row)) row.understudyOperatorId = null;
+          if (!('understudyOn' in row)) row.understudyOn = false;
+          row.revision = ROW_REVISION;
+        });
       });
   }
 }
@@ -165,6 +184,10 @@ export async function putRole(row: RoleRow): Promise<void> {
   await db.roles.put(row);
 }
 
+export async function putRoles(rows: RoleRow[]): Promise<void> {
+  await db.roles.bulkPut(rows);
+}
+
 export async function removeRole(id: string): Promise<void> {
   await db.roles.delete(id);
 }
@@ -193,6 +216,18 @@ export async function removeOperator(id: string): Promise<void> {
     const bound = await db.roles.where('operatorId').equals(id).toArray();
     if (bound.length > 0) {
       await db.roles.bulkPut(bound.map((role) => ({ ...role, operatorId: null, updatedAt: nowIso() })));
+    }
+    // 被删的师傅若担任替演，一并解除替演关系；若角色正处于接场状态则同时收回
+    const standby = await db.roles.where('understudyOperatorId').equals(id).toArray();
+    if (standby.length > 0) {
+      await db.roles.bulkPut(
+        standby.map((role) => ({
+          ...role,
+          understudyOperatorId: null,
+          understudyOn: false,
+          updatedAt: nowIso(),
+        })),
+      );
     }
     await db.cues.where('leadOperator').equals(id).modify({ leadOperator: null });
     await db.operators.delete(id);
@@ -263,12 +298,47 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
       db.operators.clear(),
       db.cues.clear(),
     ]);
-    const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION });
-    await db.plays.bulkPut(snapshot.plays.map(rev));
-    await db.scenes.bulkPut(snapshot.scenes.map(rev));
-    await db.roles.bulkPut(snapshot.roles.map(rev));
-    await db.operators.bulkPut(snapshot.operators.map(rev));
-    await db.cues.bulkPut(snapshot.cues.map(rev));
+
+    // 兼容旧版存档：补齐时间戳等基础字段
+    const stamp = nowIso();
+    const baseRow = <T extends object>(row: T): T & { createdAt: string; updatedAt: string } => ({
+      ...row,
+      createdAt: typeof (row as { createdAt?: unknown }).createdAt === 'string'
+        ? ((row as { createdAt: string }).createdAt)
+        : stamp,
+      updatedAt: typeof (row as { updatedAt?: unknown }).updatedAt === 'string'
+        ? ((row as { updatedAt: string }).updatedAt)
+        : stamp,
+    });
+
+    const operatorIds = new Set(snapshot.operators.map((operator) => operator.id));
+    const roles: RoleRow[] = snapshot.roles.map((rawRole): RoleRow => {
+      // 旧存档没有替演字段时按「无替演」处理；指向已不存在操耍人的悬挂引用一并清掉
+      const based = baseRow(rawRole);
+      const understudyOperatorId =
+        typeof based.understudyOperatorId === 'string' && operatorIds.has(based.understudyOperatorId)
+          ? based.understudyOperatorId
+          : null;
+      const operatorId =
+        based.operatorId !== null && typeof based.operatorId === 'string' && operatorIds.has(based.operatorId)
+          ? based.operatorId
+          : null;
+      return {
+        ...based,
+        operatorId,
+        understudyOperatorId,
+        // 只有主次齐全时才允许保留接场状态，否则收回
+        understudyOn: based.understudyOn === true && operatorId !== null && understudyOperatorId !== null,
+        revision: ROW_REVISION,
+      };
+    });
+
+    const rev = <T extends object>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION });
+    await db.plays.bulkPut(snapshot.plays.map((row) => rev(baseRow(row))));
+    await db.scenes.bulkPut(snapshot.scenes.map((row) => rev(baseRow(row))));
+    await db.roles.bulkPut(roles);
+    await db.operators.bulkPut(snapshot.operators.map((row) => rev(baseRow(row))));
+    await db.cues.bulkPut(snapshot.cues.map((row) => rev(baseRow(row))));
   });
 }
 

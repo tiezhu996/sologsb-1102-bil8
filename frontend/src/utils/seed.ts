@@ -18,6 +18,8 @@ interface SeedSceneSpec {
     entranceCue: string;
     lineNote: string;
     operatorIndex: number | null;
+    /** 替演师傅在 OPERATORS 中的下标；不给则该角色无替演 */
+    understudyIndex?: number | null;
   }>;
   cues: Array<{
     beatName: CueRow['beatName'];
@@ -93,6 +95,7 @@ const PLAYS: SeedPlaySpec[] = [
             entranceCue: '四击头落定后自影窗右侧起伞',
             lineNote: '「十年修得同船渡」一句拖腔走满八拍',
             operatorIndex: 0,
+            understudyIndex: 2,
           },
           {
             name: '许仙',
@@ -101,6 +104,7 @@ const PLAYS: SeedPlaySpec[] = [
             entranceCue: '小锣三击后自左侧上场',
             lineNote: '念白需压住锣鼓点，末字落在板上',
             operatorIndex: 3,
+            understudyIndex: 1,
           },
         ],
         cues: [
@@ -122,6 +126,7 @@ const PLAYS: SeedPlaySpec[] = [
             entranceCue: '喜乐起后自中门上场',
             lineNote: '唱段第二句转慢板，注意换气',
             operatorIndex: 0,
+            understudyIndex: 3,
           },
           {
             name: '小青',
@@ -175,6 +180,7 @@ const PLAYS: SeedPlaySpec[] = [
             entranceCue: '小锣一击后跌步上场',
             lineNote: '跌步含三次呼吸，落在板上',
             operatorIndex: 3,
+            understudyIndex: 2,
           },
         ],
         cues: [
@@ -207,6 +213,7 @@ const PLAYS: SeedPlaySpec[] = [
             entranceCue: '板鼓独奏中自影窗左侧入',
             lineNote: '念白带乡音，尾音落小锣',
             operatorIndex: 3,
+            understudyIndex: 0,
           },
         ],
         cues: [{ beatName: 'shuidiyu', instrument: 'bangu', atSecond: 20, note: '开箱水底鱼垫场', leadOperatorIndex: 3 }],
@@ -252,6 +259,7 @@ const PLAYS: SeedPlaySpec[] = [
             entranceCue: '四击头后翻身上场',
             lineNote: '念白快而脆，末字落在板上',
             operatorIndex: 1,
+            understudyIndex: 0,
           },
           {
             name: '铁扇公主',
@@ -260,6 +268,7 @@ const PLAYS: SeedPlaySpec[] = [
             entranceCue: '大锣一击亮扇',
             lineNote: '与悟空对咬鼓点，不可抢板',
             operatorIndex: 2,
+            understudyIndex: 3,
           },
         ],
         cues: [
@@ -321,6 +330,10 @@ export async function seedDatabase(): Promise<void> {
 
       sceneSpec.roles.forEach((roleSpec) => {
         const operator = roleSpec.operatorIndex === null ? null : operatorRows[roleSpec.operatorIndex];
+        const understudy =
+          roleSpec.understudyIndex === undefined || roleSpec.understudyIndex === null
+            ? null
+            : operatorRows[roleSpec.understudyIndex];
         const roleId = uuid();
         roleRows.push({
           id: roleId,
@@ -331,6 +344,8 @@ export async function seedDatabase(): Promise<void> {
           entranceCue: roleSpec.entranceCue,
           lineNote: roleSpec.lineNote,
           operatorId: operator ? operator.id : null,
+          understudyOperatorId: understudy ? understudy.id : null,
+          understudyOn: false,
           createdAt: stamp,
           updatedAt: stamp,
           revision: ROW_REVISION,

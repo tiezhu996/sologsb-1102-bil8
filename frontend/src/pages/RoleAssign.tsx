@@ -34,10 +34,13 @@ import {
   SaveOutlined,
   SoundOutlined,
   SwapOutlined,
+  UndoOutlined,
+  UserSwitchOutlined,
 } from '@ant-design/icons';
 import { AssigneePicker, type AssigneeOption } from '../components/common/AssigneePicker';
 import { EmptyState } from '../components/common/EmptyState';
 import { useOperatorConflict } from '../hooks/useOperatorConflict';
+import { useUnderstudy } from '../hooks/useUnderstudy';
 import { useOperatorStore } from '../stores/operatorStore';
 import { useSceneStore } from '../stores/sceneStore';
 import { usePlayStore } from '../stores/playStore';
@@ -78,12 +81,14 @@ export default function RoleAssign() {
 
   const operators = useOperatorStore((state) => state.operators);
   const loadOperators = useOperatorStore((state) => state.loadOperators);
+  const syncAssignments = useOperatorStore((state) => state.syncAssignments);
   const scenes = useSceneStore((state) => state.scenes);
   const loadScenes = useSceneStore((state) => state.loadScenes);
   const plays = usePlayStore((state) => state.plays);
 
   const roleIds = useMemo(() => roles.map((role) => role.id), [roles]);
   const conflict = useOperatorConflict(roleIds);
+  const understudy = useUnderstudy(roles);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -142,6 +147,8 @@ export default function RoleAssign() {
       entranceCue: values.entranceCue.trim(),
       lineNote: values.lineNote.trim(),
       operatorId: null,
+      understudyOperatorId: null,
+      understudyOn: false,
       createdAt: nowIso(),
       updatedAt: nowIso(),
       revision: ROW_REVISION,
@@ -170,6 +177,11 @@ export default function RoleAssign() {
   };
 
   const handleBind = async (roleId: string, operatorId: string) => {
+    const target = roles.find((role) => role.id === roleId);
+    if (target?.understudyOn === true) {
+      message.warning('当前是替演接场状态，请先「撤销接场」再调整主操耍人');
+      return;
+    }
     const assessment = conflict.assess(roleId, operatorId);
     if (!assessment.assignable) {
       message.warning(assessment.blockReason);
@@ -181,14 +193,101 @@ export default function RoleAssign() {
       return;
     }
     const holder = operators.find((operator) => operator.id === operatorId);
-    await patchRole(roleId, { operatorId });
+    // 新主操人若正好是原替演（同一人不能兼任），替演关系一并解除
+    const patch: Partial<RoleRow> = { operatorId };
+    if (target?.understudyOperatorId === operatorId) {
+      patch.understudyOperatorId = null;
+    }
+    await patchRole(roleId, patch);
     message.success(`已指派给 ${holder?.name ?? '该操耍人'}`);
   };
 
   const handleUnbind = async (roleId: string) => {
+    const target = roles.find((role) => role.id === roleId);
+    if (target?.understudyOn === true) {
+      message.warning('当前是替演接场状态，请先「撤销接场」再解绑');
+      return;
+    }
     await conflict.unbind(roleId);
-    await patchRole(roleId, { operatorId: null });
+    // 没有主操耍人时替演也无意义，一并清掉
+    await patchRole(roleId, { operatorId: null, understudyOperatorId: null });
     message.success('已解绑操耍人');
+  };
+
+  /** 替演候选人：排除主操耍人本人，同场已操耍其他角色的师傅禁用并写明原因 */
+  const understudyOptionsFor = useCallback(
+    (role: RoleRow): Array<{ value: string; label: string; disabled: boolean; reason: string }> =>
+      operators.map((operator) => {
+        const assessment = understudy.assessUnderstudy(role, operator.id);
+        return {
+          value: operator.id,
+          label: `${operator.name}${assessment.eligible ? '' : '（同场占用）'}`,
+          disabled: !assessment.eligible,
+          reason: assessment.reason,
+        };
+      }),
+    [operators, understudy],
+  );
+
+  const handleSetUnderstudy = async (role: RoleRow, operatorId: string | null | undefined) => {
+    const nextId = operatorId ?? null;
+    if (nextId === null) {
+      await patchRole(role.id, { understudyOperatorId: null });
+      message.success('已撤掉替演师傅');
+      return;
+    }
+    const assessment = understudy.assessUnderstudy(role, nextId);
+    if (!assessment.eligible) {
+      message.warning(assessment.reason);
+      return;
+    }
+    await patchRole(role.id, { understudyOperatorId: nextId });
+    const holder = operators.find((operator) => operator.id === nextId);
+    message.success(`已定 ${holder?.name ?? '该师傅'} 为「${role.name}」的替演`);
+  };
+
+  const handleHandover = async (role: RoleRow) => {
+    const check = understudy.checkTakeover(role);
+    if (!check.allowed) {
+      message.warning(check.reason);
+      return;
+    }
+    const result = await understudy.handover(role);
+    if (!result.ok) {
+      message.warning(result.reason || '接场失败');
+      await reload();
+      return;
+    }
+    const current = roles.find((item) => item.id === role.id);
+    if (!current || current.operatorId === null || current.understudyOperatorId === null) return;
+    const swapped: RoleRow = {
+      ...current,
+      operatorId: current.understudyOperatorId,
+      understudyOperatorId: current.operatorId,
+      understudyOn: true,
+      updatedAt: nowIso(),
+    };
+    setRoles((prev) => prev.map((item) => (item.id === role.id ? swapped : item)));
+    await syncAssignments([...roles.map((item) => (item.id === role.id ? swapped : item))]);
+    const standbyName = operators.find((operator) => operator.id === swapped.operatorId)?.name ?? '替演师傅';
+    message.success(`替演 ${standbyName} 已接场，原主操人自动转为替演`);
+  };
+
+  const handleRevertHandover = async (role: RoleRow) => {
+    await understudy.revert(role);
+    const current = roles.find((item) => item.id === role.id);
+    if (!current || current.operatorId === null || current.understudyOperatorId === null) return;
+    const restored: RoleRow = {
+      ...current,
+      operatorId: current.understudyOperatorId,
+      understudyOperatorId: current.operatorId,
+      understudyOn: false,
+      updatedAt: nowIso(),
+    };
+    setRoles((prev) => prev.map((item) => (item.id === role.id ? restored : item)));
+    await syncAssignments([...roles.map((item) => (item.id === role.id ? restored : item))]);
+    const primaryName = operators.find((operator) => operator.id === restored.operatorId)?.name ?? '主操耍人';
+    message.success(`已撤销接场，${primaryName} 回到主操耍位`);
   };
 
   const columns: ColumnsType<RoleRow> = [
@@ -288,6 +387,83 @@ export default function RoleAssign() {
             ) : (
               <Typography.Text type="warning" style={{ fontSize: 12 }}>
                 尚未指派操耍人
+              </Typography.Text>
+            )}
+          </Space>
+        );
+      },
+    },
+    {
+      title: '替演 / 接场',
+      key: 'understudy',
+      width: 260,
+      render: (_value, record) => {
+        const options = understudyOptionsFor(record);
+        const activeName =
+          operators.find((operator) => operator.id === record.operatorId)?.name ?? '（待指派）';
+        const standbyName =
+          operators.find((operator) => operator.id === record.understudyOperatorId)?.name ?? null;
+        const onStage = record.understudyOn === true;
+        return (
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            <Space size={6} wrap>
+              <Select<string>
+                size="small"
+                style={{ minWidth: 170 }}
+                value={record.understudyOperatorId ?? undefined}
+                disabled={record.operatorId === null || onStage}
+                showSearch
+                optionFilterProp="label"
+                placeholder={record.operatorId === null ? '先指派主操耍人' : '指定替演师傅'}
+                notFoundContent="操耍人档为空，请先到「操耍人档」新增"
+                options={options.map((option) => ({
+                  value: option.value,
+                  label: option.label,
+                  disabled: option.disabled,
+                }))}
+                onSelect={(value) => {
+                  const option = options.find((item) => item.value === value);
+                  if (option && option.disabled) message.warning(option.reason);
+                }}
+                allowClear
+                onChange={(next) => void handleSetUnderstudy(record, next ?? null)}
+              />
+              {onStage ? (
+                <Tooltip title="撤销接场：主次两人回到接场前">
+                  <Button
+                    size="small"
+                    icon={<UndoOutlined />}
+                    onClick={() => void handleRevertHandover(record)}
+                  >
+                    撤销接场
+                  </Button>
+                </Tooltip>
+              ) : (
+                <Tooltip title={standbyName ? `让替演 ${standbyName} 接场` : '请先指定替演师傅'}>
+                  <Button
+                    size="small"
+                    type="primary"
+                    ghost
+                    icon={<UserSwitchOutlined />}
+                    disabled={record.understudyOperatorId === null}
+                    onClick={() => void handleHandover(record)}
+                  >
+                    让替演接场
+                  </Button>
+                </Tooltip>
+              )}
+            </Space>
+            {onStage ? (
+              <Typography.Text type="danger" style={{ fontSize: 12 }}>
+                接场中：{activeName} 正在操耍；原主操人{standbyName ?? ''}待场
+              </Typography.Text>
+            ) : standbyName ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                替演 {standbyName} 待场；主操耍人上不了场时点「让替演接场」
+              </Typography.Text>
+            ) : (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                未指定替演，照常以主操耍人为准
               </Typography.Text>
             )}
           </Space>
@@ -410,11 +586,13 @@ export default function RoleAssign() {
             columns={columns}
             dataSource={roles}
             pagination={false}
-            scroll={{ x: 1200 }}
+            scroll={{ x: 1460 }}
             expandable={{
               expandedRowRender: (record) => {
                 const assessmentList = optionsFor(record.id);
                 const blocked = assessmentList.filter((option) => !option.assessment.assignable);
+                const standbyOption = understudyOptionsFor(record);
+                const standbyBlocked = standbyOption.filter((option) => option.disabled);
                 return (
                   <Space direction="vertical" size={6} style={{ width: '100%' }}>
                     <Typography.Text strong>指派详情</Typography.Text>
@@ -422,12 +600,41 @@ export default function RoleAssign() {
                       value={record.operatorId}
                       options={assessmentList}
                       placeholder="为该角色选择操耍人"
+                      disabled={record.understudyOn === true}
                       onChange={(operatorId) => void handleBind(record.id, operatorId)}
                       onClear={() => void handleUnbind(record.id)}
                       onBlocked={(reason) => message.warning(reason)}
                     />
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                       候选 {assessmentList.length} 人，其中 {blocked.length} 人因时段冲突被拦截。
+                    </Typography.Text>
+                    <Typography.Text strong style={{ marginTop: 4 }}>
+                      替演师傅
+                    </Typography.Text>
+                    <Select<string>
+                      style={{ minWidth: 240 }}
+                      value={record.understudyOperatorId ?? undefined}
+                      disabled={record.operatorId === null || record.understudyOn === true}
+                      showSearch
+                      optionFilterProp="label"
+                      placeholder="指定一名替演师傅（同场操耍其他角色者不可选）"
+                      options={standbyOption.map((option) => ({
+                        value: option.value,
+                        label: option.label,
+                        disabled: option.disabled,
+                      }))}
+                      onSelect={(value) => {
+                        const option = standbyOption.find((item) => item.value === value);
+                        if (option && option.disabled) message.warning(option.reason);
+                      }}
+                      onChange={(next) => void handleSetUnderstudy(record, next ?? null)}
+                      allowClear
+                    />
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      同场已操耍其他角色的师傅不可选为替演；
+                      {standbyBlocked.length > 0
+                        ? `${standbyBlocked.length} 人不可选。`
+                        : '当前无人被同场占用。'}
                     </Typography.Text>
                   </Space>
                 );

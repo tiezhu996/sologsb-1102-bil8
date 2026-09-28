@@ -38,11 +38,13 @@ docker compose up -d --build
 | --- | --- |
 | 剧目库 | 新建剧目、按剧种（传统折子/新编）与状态（筹备中/排练中/可上演）筛选，环形指示展示平均排练成熟度 |
 | 场次拆分 | 场序表拖拽调序（自动重排并落库）、按场次勾选「本次排练覆盖范围」、左右相邻场次合计时长参考 |
-| 角色指派 | 登记全场影人角色（行当 / 需备影件 / 出场提示 / 唱白要点），为每个角色指派操耍人 |
+| 角色指派 | 登记全场影人角色（行当 / 需备影件 / 出场提示 / 唱白要点），为每个角色指派主操耍人与一名替演师傅；主操耍人无法上场时可一键让替演接场、再一键撤销 |
 | 锣鼓点时间轴 | 按秒点插入急急风/四击头/水底鱼，选主奏乐器与领奏操耍人，刻度尺可点击定位、可试排播放 |
 | 操耍人档 | 维护技能标签（签子/连本/武打）与冲突时段，查看每人已派角色与累计排练时长，两两时段冲突对比 |
 
 **冲突拦截**：指派操耍人时，会依据该人已排时段与同场其他影人操耍人的时段做重叠判定，冲突的候选人在下拉中直接禁用并给出拦截原因；操耍人自身时段互相重叠也会高亮预警。
+
+**替演与接场**：每个角色可定一名替演师傅，同场已经在操耍其他角色的师傅不能选为替演（下拉禁用并写明他演了谁）。主操耍人上不了场时点「让替演接场」，替演成为当前操耍人、原主操人自动转为替演；接场前还会复查替演在本场是否另顶着角色（哪怕只是待场替演），撞上就点名挡住且主次关系不变。接场后可一键「撤销接场」，主次两人原样回到接场前。
 
 ---
 
@@ -115,7 +117,7 @@ sologsb-1102/
 | --- | --- | --- |
 | Play 剧目 | `src/types/play.ts` | id、title、genre、scriptText、totalScenes、premiereVenue、status |
 | Scene 场次 | `src/types/scene.ts` | id、playId、seq、title、durationMin、stageNote、needsShadowScreen、progress |
-| ShadowRole 影人角色 | `src/types/role.ts` | id、sceneId、name、roleType、propParts、entranceCue、lineNote、operatorId |
+| ShadowRole 影人角色 | `src/types/role.ts` | id、sceneId、name、roleType、propParts、entranceCue、lineNote、operatorId、understudyOperatorId、understudyOn |
 | Operator 操耍人 | `src/types/operator.ts` | id、name、skillTags、busySlots、assignedRoleIds、rehearsalHours |
 | PercussionCue 锣鼓点 | `src/types/cue.ts` | id、sceneId、beatName、instrument、atSecond、leadOperator、note |
 
@@ -123,7 +125,7 @@ sologsb-1102/
 
 ## 六、数据存储说明
 
-- **IndexedDB（Dexie）**：`src/utils/db.ts` 封装全部读写，数据库名 `gbshadowplay`，当前结构版本 **2**，并在 `version(2).upgrade()` 中提供升级迁移逻辑（补齐 `revision` 行修订号、兜底 `createdAt/updatedAt`）。
+- **IndexedDB（Dexie）**：`src/utils/db.ts` 封装全部读写，数据库名 `gbshadowplay`，当前结构版本 **3**：v2 补齐 `revision` 行修订号并兜底 `createdAt/updatedAt`；v3 为影人角色新增替演师傅（`understudyOperatorId`）与接场状态（`understudyOn`），旧库升级时自动补成「无替演、未接场」，导入旧存档也会就地归一化（含悬挂引用清理），不报错。
 - **localStorage**：`src/utils/localStore.ts` 统一封装界面偏好（最近打开的剧目、场次页「只看本次勾选」开关等）。
 - **首次打开**：数据库为空时自动灌入示例班社数据（3 出剧目 / 6 个场次 / 12 个影人角色 / 4 位操耍人 / 10 处锣鼓点），保证界面开箱即有内容可点。
 - **导入导出**：剧目库支持导出整库 JSON 存档、导入存档覆盖、以及重置为示例数据；操耍人档支持导出 CSV，剧目可导出排练通告 CSV。

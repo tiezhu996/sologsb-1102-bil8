@@ -485,7 +485,20 @@ export default function OperatorList() {
                               const roleId = boundRoles[0].id;
                               const role = roles.find((item) => item.id === roleId);
                               if (!next || !role) return;
-                              const updatedRole: RoleRow = { ...role, operatorId: nextId, updatedAt: nowIso(), revision: ROW_REVISION };
+                              if (role.understudyOn === true) {
+                                message.warning(`「${role.name}」正在由替演接场，请先到角色页撤销接场再换绑`);
+                                return;
+                              }
+                              // 新主操人若正好是该角色替演，替演关系一并解除（不能一人兼任）
+                              const understudyOperatorId =
+                                role.understudyOperatorId === nextId ? null : role.understudyOperatorId ?? null;
+                              const updatedRole: RoleRow = {
+                                ...role,
+                                operatorId: nextId,
+                                understudyOperatorId,
+                                updatedAt: nowIso(),
+                                revision: ROW_REVISION,
+                              };
                               const { db } = await import('../utils/db');
                               await db.roles.put(updatedRole);
                               await putOperator({
